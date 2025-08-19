@@ -1,4 +1,4 @@
-nname: Enhanced WSF Ferry Bot
+name: Enhanced WSF Ferry Bot
 
 on:
   schedule:
