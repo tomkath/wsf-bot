@@ -118,7 +118,7 @@ jobs:
                     # Edit this section to change what route/date to monitor
                     target_from = 'Orcas Island'      # EDIT: Change departure terminal here
                     target_to = 'Anacortes'           # EDIT: Change arrival terminal here
-                    target_dates = ['2025-09-21', '09/21/2025']  # EDIT: Add/change target dates here
+                    target_dates = ['2025-09-20', '09/21/2025']  # EDIT: Add/change target dates here
                     
                     # Check if this is the route and date we want to monitor
                     if (ferry_config['terminal_from'] == target_from and 
