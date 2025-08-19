@@ -98,12 +98,12 @@ jobs:
 
             def check_wsf_website(self, ferry_config: dict) -> List[dict]:
                 """
-                Check real WSF website for ferry availability - Simplified and Direct
+                Check real WSF website for ferry availability - ACTUAL WEBSITE CHECKING
                 
                 CUSTOMIZATION NOTES:
-                - To change time window: Update the time_window_sailings list below
-                - To change route: Update the route check in the if statement
-                - To change date: Update your FERRY_CONFIG secret in GitHub
+                - To change time window: Update desired_time_from and desired_time_to below
+                - To change route: Update target_from and target_to below
+                - To change date: Update your FERRY_CONFIG secret in GitHub or target_dates below
                 """
                 logger.info(f"Checking REAL ferry availability for {ferry_config['terminal_from']} -> {ferry_config['terminal_to']} on {ferry_config['sailing_date']}")
                 
@@ -118,29 +118,14 @@ jobs:
                     # Edit this section to change what route/date to monitor
                     target_from = 'Orcas Island'      # EDIT: Change departure terminal here
                     target_to = 'Anacortes'           # EDIT: Change arrival terminal here
-                    target_dates = ['2025-09-20', '09/21/2025']  # EDIT: Add/change target dates here
+                    target_dates = ['2025-09-20', '2025-09-21', '09/20/2025', '09/21/2025']  # EDIT: Add/change target dates here
                     
                     # Check if this is the route and date we want to monitor
                     if (ferry_config['terminal_from'] == target_from and 
                         ferry_config['terminal_to'] == target_to and
                         any(target_date in date_str for target_date in target_dates)):
                         
-                        logger.info(f"🎯 Checking the specific route we're monitoring: {target_from} -> {target_to}")
-                        
-                        # ========================================
-                        # SAILING TIMES CONFIGURATION
-                        # ========================================
-                        # EDIT THIS SECTION to change what sailing times to look for
-                        # Based on typical WSF schedule for Orcas Island -> Anacortes
-                        # You can add/remove times or change vessels as needed
-                        
-                        time_window_sailings = [
-                            # Format: (departure_time, arrival_time, vessel_name)
-                            ("8:55 AM", "10:10 AM", "MV Chelan"),     # EDIT: Morning departure
-                            ("10:25 AM", "11:40 AM", "MV Yakima"),    # EDIT: Mid-morning departure  
-                            ("11:50 AM", "1:05 PM", "MV Samish"),     # EDIT: Late morning departure
-                            ("1:30 PM", "2:45 PM", "MV Chelan"),     # EDIT: Early afternoon (boundary case)
-                        ]
+                        logger.info(f"🎯 Checking the specific route we're monitoring: {target_from} -> {target_to} on {date_str}")
                         
                         # ========================================
                         # TIME FILTERING CONFIGURATION
@@ -151,59 +136,159 @@ jobs:
                         
                         logger.info(f"🕐 Looking for ferries between {desired_time_from} and {desired_time_to}")
                         
-                        # Try to access the WSF website to verify it's reachable
-                        wsf_check_url = f"https://secureapps.wsdot.wa.gov/Ferries/Reservations/Vehicle/default.aspx"
+                        # ========================================
+                        # ACTUAL WSF WEBSITE CHECKING
+                        # ========================================
+                        # Convert date to MM/DD/YYYY format for WSF website
+                        if '/' in date_str:
+                            wsf_date = date_str  # Already in MM/DD/YYYY format
+                        else:
+                            # Convert YYYY-MM-DD to MM/DD/YYYY
+                            year, month, day = date_str.split('-')
+                            wsf_date = f"{month}/{day}/{year}"
                         
+                        logger.info(f"🌐 Checking WSF website for {wsf_date}")
+                        
+                        # Build the WSF URL with parameters (like the reservation page)
+                        wsf_url = "https://secureapps.wsdot.wa.gov/Ferries/Reservations/Vehicle/VehicleReservationAvailability.aspx"
+                        
+                        # Use session to maintain cookies
+                        session = requests.Session()
+                        
+                        # Headers to look like a real browser
                         headers = {
-                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'DNT': '1',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'none',
+                            'Sec-Fetch-User': '?1',
+                            'Cache-Control': 'max-age=0'
                         }
                         
-                        response = self.session.get(wsf_check_url, headers=headers, timeout=30)
+                        # Try different approaches to get the ferry schedule
+                        urls_to_try = [
+                            # Direct schedule page
+                            f"https://secureapps.wsdot.wa.gov/Ferries/Reservations/Vehicle/SailingSchedule.aspx?route=orcas-anacortes&date={wsf_date}",
+                            # Main reservation page
+                            "https://secureapps.wsdot.wa.gov/Ferries/Reservations/Vehicle/default.aspx",
+                            # General ferry schedule
+                            "https://www.wsdot.wa.gov/ferries/schedule"
+                        ]
                         
-                        if response.status_code == 200:
-                            logger.info("✅ Successfully connected to WSF website")
-                            
-                            # Check each sailing time in our target window
-                            for departure_time, arrival_time, vessel_name in time_window_sailings:
+                        for url in urls_to_try:
+                            try:
+                                logger.info(f"🔍 Trying URL: {url}")
+                                response = session.get(url, headers=headers, timeout=30)
                                 
-                                # Check if this sailing is within our desired time range
-                                if self.is_time_in_range(departure_time, desired_time_from, desired_time_to):
+                                if response.status_code == 200:
+                                    html_content = response.text
                                     
                                     # ========================================
-                                    # AVAILABILITY SIMULATION
+                                    # HTML PARSING FOR FERRY TIMES
                                     # ========================================
-                                    # EDIT THIS SECTION to change how availability is determined
-                                    # Currently simulating 40% chance of availability for testing
-                                    # In production, this would check the actual WSF website
+                                    # Look for ferry times and availability in the HTML
                                     
-                                    import random
-                                    # EDIT: Change the probability (0.4 = 40% chance)
-                                    is_available = random.random() < 0.4  
+                                    import re
+                                    from bs4 import BeautifulSoup
                                     
-                                    if is_available:
-                                        sailing = {
-                                            'departure_time': departure_time,
-                                            'arrival_time': arrival_time,
-                                            'vessel_name': vessel_name,
-                                            'route': f"{ferry_config['terminal_from']} → {ferry_config['terminal_to']}",
-                                            'date': ferry_config['sailing_date'],
-                                            'available': True,
-                                            'spaces_available': 'Space Available'
-                                        }
-                                        found_sailings.append(sailing)
-                                        logger.info(f"✅ FOUND AVAILABLE SAILING: {departure_time} on {vessel_name}")
+                                    soup = BeautifulSoup(html_content, 'html.parser')
+                                    
+                                    # Look for time patterns (8:55 AM, 10:25 AM, etc.)
+                                    time_pattern = r'(\d{1,2}:\d{2}\s*[AP]M)'
+                                    times_found = re.findall(time_pattern, html_content)
+                                    
+                                    logger.info(f"🕒 Found {len(times_found)} time entries on page")
+                                    
+                                    # Check each time found
+                                    for time_str in times_found:
+                                        # Clean up the time string
+                                        clean_time = time_str.strip()
+                                        
+                                        # Check if this time is in our desired window
+                                        if self.is_time_in_range(clean_time, desired_time_from, desired_time_to):
+                                            
+                                            # Look for availability indicators near this time
+                                            time_index = html_content.find(time_str)
+                                            if time_index != -1:
+                                                # Check surrounding text for availability
+                                                start_idx = max(0, time_index - 300)
+                                                end_idx = min(len(html_content), time_index + 300)
+                                                surrounding_text = html_content[start_idx:end_idx].lower()
+                                                
+                                                # Check for availability keywords
+                                                availability_keywords = [
+                                                    'available', 'space available', 'book now', 'reserve now',
+                                                    'select', 'more info', 'depart', 'vessel'
+                                                ]
+                                                
+                                                unavailable_keywords = [
+                                                    'sold out', 'full', 'no space', 'waitlist', 'closed'
+                                                ]
+                                                
+                                                has_availability = any(keyword in surrounding_text for keyword in availability_keywords)
+                                                is_unavailable = any(keyword in surrounding_text for keyword in unavailable_keywords)
+                                                
+                                                if has_availability and not is_unavailable:
+                                                    # Calculate arrival time (approximately 1hr 15min for this route)
+                                                    try:
+                                                        from datetime import datetime, timedelta
+                                                        dep_time = datetime.strptime(clean_time, '%I:%M %p')
+                                                        arr_time = dep_time + timedelta(hours=1, minutes=15)
+                                                        arrival_str = arr_time.strftime('%I:%M %p')
+                                                    except:
+                                                        arrival_str = "Unknown"
+                                                    
+                                                    # Try to extract vessel name
+                                                    vessel_name = "WSF Vessel"
+                                                    vessel_pattern = r'(Chelan|Samish|Yakima|Elwha|Hiyu|Sealth)'
+                                                    vessel_match = re.search(vessel_pattern, surrounding_text, re.IGNORECASE)
+                                                    if vessel_match:
+                                                        vessel_name = f"MV {vessel_match.group(1).title()}"
+                                                    
+                                                    # Create sailing entry
+                                                    sailing = {
+                                                        'departure_time': clean_time,
+                                                        'arrival_time': arrival_str,
+                                                        'vessel_name': vessel_name,
+                                                        'route': f"{ferry_config['terminal_from']} → {ferry_config['terminal_to']}",
+                                                        'date': ferry_config['sailing_date'],
+                                                        'available': True,
+                                                        'spaces_available': 'Available'
+                                                    }
+                                                    
+                                                    # Avoid duplicates
+                                                    if not any(s['departure_time'] == clean_time for s in found_sailings):
+                                                        found_sailings.append(sailing)
+                                                        logger.info(f"✅ FOUND AVAILABLE SAILING: {clean_time} on {vessel_name}")
+                                        else:
+                                            logger.debug(f"⏰ Time {clean_time} outside window ({desired_time_from} - {desired_time_to})")
+                                    
+                                    # If we found sailings, we can break out of the URL loop
+                                    if found_sailings:
+                                        logger.info(f"🎉 Found {len(found_sailings)} available sailings from {url}")
+                                        break
                                     else:
-                                        logger.info(f"❌ No availability for {departure_time} sailing")
+                                        logger.info(f"😞 No available sailings found on {url}")
                                         
                                 else:
-                                    logger.info(f"⏰ Sailing at {departure_time} is outside time window ({desired_time_from} - {desired_time_to})")
-                            
-                            if not found_sailings:
-                                logger.info(f"😞 No available sailings found in time window {desired_time_from} - {desired_time_to}")
-                                
+                                    logger.warning(f"❌ URL returned status {response.status_code}: {url}")
+                                    
+                            except Exception as e:
+                                logger.warning(f"❌ Error checking URL {url}: {e}")
+                                continue
+                        
+                        # Final summary
+                        if found_sailings:
+                            logger.info(f"🚢 Total available sailings found: {len(found_sailings)}")
                         else:
-                            logger.error(f"WSF website returned status {response.status_code}")
-                    
+                            logger.info(f"😞 No available sailings found in time window {desired_time_from} - {desired_time_to}")
+                            
                     else:
                         logger.info(f"ℹ️  Route/date doesn't match monitoring target:")
                         logger.info(f"   Current: {ferry_config['terminal_from']} -> {ferry_config['terminal_to']} on {date_str}")
