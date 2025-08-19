@@ -1,4 +1,4 @@
-name: WSF Ferry Bot
+nname: Enhanced WSF Ferry Bot
 
 on:
   schedule:
@@ -21,174 +21,533 @@ jobs:
         
     - name: Install dependencies
       run: |
-        pip install requests pyyaml beautifulsoup4 selenium webdriver-manager
+        pip install requests pyyaml beautifulsoup4
         
-    - name: Run ferry bot
+    - name: Create enhanced ferry bot
+      run: |
+        cat > enhanced_ferry_bot.py << 'EOF'
+        #!/usr/bin/env python3
+        """
+        Enhanced WSF Ferry Bot with Real API Integration, Time Filtering and Discord Notifications
+        """
+
+        import requests
+        import json
+        import time
+        import logging
+        from datetime import datetime, timedelta
+        from typing import List, Dict, Optional, Tuple
+        import re
+        from dataclasses import dataclass
+        from urllib.parse import urlencode
+        import os
+
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        logger = logging.getLogger(__name__)
+
+        @dataclass
+        class FerryRequest:
+            """Configuration for a ferry route to monitor"""
+            terminal_from: str
+            terminal_to: str
+            sailing_date: str
+            sailing_time_from: Optional[str] = None  # e.g., "08:00 AM"
+            sailing_time_to: Optional[str] = None    # e.g., "06:00 PM"
+            vehicle_size: str = "Normal"             # Normal, Large, Oversize
+            vehicle_height: str = "Normal"           # Normal, Tall, TallXL
+            passengers: int = 2                      # Number of passengers
+
+        @dataclass
+        class AvailableSailing:
+            """Represents an available ferry sailing"""
+            departure_time: str
+            arrival_time: str
+            vessel_name: str
+            route_id: int
+            departing_terminal_id: int
+            arriving_terminal_id: int
+            annotations: List[str]
+            is_cancelled: bool = False
+
+        class WSFFerryBot:
+            def __init__(self, discord_webhook_url: str, wsdot_api_key: str, check_interval: int = 300):
+                self.discord_webhook_url = discord_webhook_url
+                self.wsdot_api_key = wsdot_api_key
+                self.check_interval = check_interval
+                self.session = requests.Session()
+                self.session.headers.update({
+                    'User-Agent': 'WSF-Ferry-Bot/1.0 (Enhanced Version with Time Filtering)'
+                })
+                
+                # WSDOT Official API endpoints
+                self.wsf_api_base = "https://www.wsdot.wa.gov/ferries/api"
+                self.schedule_api = f"{self.wsf_api_base}/schedule/rest"
+                self.terminal_api = f"{self.wsf_api_base}/terminals/rest"
+                self.vessel_api = f"{self.wsf_api_base}/vessels/rest"
+                
+                # Cache for terminals and routes
+                self.terminals_cache = {}
+                self.routes_cache = {}
+                self.cache_expiry = None
+                
+                # Initialize terminal and route data
+                self._load_terminal_and_route_data()
+
+            def _load_terminal_and_route_data(self):
+                """Load and cache terminal and route data from WSF API"""
+                try:
+                    logger.info("Loading terminal and route data from WSF API...")
+                    
+                    # Get terminals
+                    terminals_url = f"{self.terminal_api}/terminals?apiaccesscode={self.wsdot_api_key}"
+                    response = self.session.get(terminals_url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        terminals_data = response.json()
+                        for terminal in terminals_data:
+                            terminal_name = terminal.get('TerminalName', '').strip()
+                            terminal_id = terminal.get('TerminalID')
+                            if terminal_name and terminal_id:
+                                # Handle common name variations
+                                self.terminals_cache[terminal_name] = terminal_id
+                                # Add common aliases
+                                if 'Bainbridge' in terminal_name:
+                                    self.terminals_cache['Bainbridge Island'] = terminal_id
+                                elif 'Friday Harbor' in terminal_name:
+                                    self.terminals_cache['Friday Harbor'] = terminal_id
+                                    self.terminals_cache['San Juan Island'] = terminal_id
+                        
+                        logger.info(f"Loaded {len(self.terminals_cache)} terminals")
+                    
+                    # Get today's date for route lookup
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Get routes
+                    routes_url = f"{self.schedule_api}/routes/{today}?apiaccesscode={self.wsdot_api_key}"
+                    response = self.session.get(routes_url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        routes_data = response.json()
+                        for route in routes_data:
+                            route_id = route.get('RouteID')
+                            departing_terminal_id = route.get('DepartingTerminalID')
+                            arriving_terminal_id = route.get('ArrivingTerminalID')
+                            
+                            if route_id and departing_terminal_id and arriving_terminal_id:
+                                route_key = (departing_terminal_id, arriving_terminal_id)
+                                self.routes_cache[route_key] = route_id
+                        
+                        logger.info(f"Loaded {len(self.routes_cache)} routes")
+                    
+                    self.cache_expiry = datetime.now() + timedelta(hours=24)
+                    
+                except Exception as e:
+                    logger.error(f"Error loading terminal/route data: {e}")
+                    # Fallback to hardcoded values if API fails
+                    self._load_fallback_data()
+
+            def _load_fallback_data(self):
+                """Fallback terminal data if API is unavailable"""
+                logger.warning("Using fallback terminal data")
+                self.terminals_cache = {
+                    'Seattle': 7,
+                    'Bainbridge Island': 3,
+                    'Edmonds': 8,
+                    'Kingston': 11,
+                    'Mukilteo': 14,
+                    'Clinton': 5,
+                    'Anacortes': 1,
+                    'Orcas Island': 16,
+                    'Friday Harbor': 9,
+                    'Lopez Island': 12,
+                    'Shaw Island': 20,
+                    'Sidney BC': 21,
+                    'Vashon Island': 23,
+                    'Southworth': 19,
+                    'Fauntleroy': 18,
+                    'Port Townsend': 17,
+                    'Coupeville': 6
+                }
+
+            def get_terminal_id(self, terminal_name: str) -> Optional[int]:
+                """Get terminal ID from name"""
+                # Refresh cache if expired
+                if self.cache_expiry and datetime.now() > self.cache_expiry:
+                    self._load_terminal_and_route_data()
+                
+                return self.terminals_cache.get(terminal_name.strip())
+
+            def get_route_id(self, from_terminal_id: int, to_terminal_id: int) -> Optional[int]:
+                """Get route ID from terminal IDs"""
+                return self.routes_cache.get((from_terminal_id, to_terminal_id))
+
+            def parse_time(self, time_str: str) -> Optional[datetime]:
+                """Parse time string in various formats"""
+                if not time_str:
+                    return None
+                
+                time_formats = [
+                    "%I:%M %p",  # 12:30 PM
+                    "%H:%M",     # 14:30
+                    "%I%p",      # 2PM
+                    "%H"         # 14
+                ]
+                
+                for fmt in time_formats:
+                    try:
+                        return datetime.strptime(time_str.strip(), fmt)
+                    except ValueError:
+                        continue
+                return None
+
+            def parse_wsf_time(self, wsf_time_str: str) -> Optional[datetime]:
+                """Parse WSF API time format: /Date(928174800000-0700)/"""
+                try:
+                    if not wsf_time_str or not wsf_time_str.startswith('/Date('):
+                        return None
+                    
+                    # Extract timestamp from /Date(928174800000-0700)/
+                    timestamp_part = wsf_time_str.replace('/Date(', '').replace(')/', '')
+                    
+                    # Handle timezone offset
+                    if '+' in timestamp_part:
+                        timestamp_ms = int(timestamp_part.split('+')[0])
+                    elif '-' in timestamp_part and timestamp_part.count('-') > 0:
+                        # Find the last dash (timezone indicator)
+                        parts = timestamp_part.rsplit('-', 1)
+                        timestamp_ms = int(parts[0])
+                    else:
+                        timestamp_ms = int(timestamp_part)
+                    
+                    # Convert from milliseconds to seconds
+                    timestamp_s = timestamp_ms / 1000
+                    
+                    return datetime.fromtimestamp(timestamp_s)
+                    
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Could not parse WSF time '{wsf_time_str}': {e}")
+                    return None
+
+            def is_time_in_range(self, sailing_time: datetime, time_from: Optional[str], time_to: Optional[str]) -> bool:
+                """Check if sailing time falls within the specified range"""
+                if not time_from and not time_to:
+                    return True
+                
+                if not sailing_time:
+                    return True  # If we can't parse, include it
+                
+                if time_from:
+                    from_dt = self.parse_time(time_from)
+                    if from_dt and sailing_time.time() < from_dt.time():
+                        return False
+                
+                if time_to:
+                    to_dt = self.parse_time(time_to)
+                    if to_dt and sailing_time.time() > to_dt.time():
+                        return False
+                
+                return True
+
+            def check_ferry_availability(self, ferry_request: FerryRequest) -> List[AvailableSailing]:
+                """Check ferry availability using the official WSDOT API"""
+                available_sailings = []
+                
+                try:
+                    # Get terminal IDs
+                    from_terminal_id = self.get_terminal_id(ferry_request.terminal_from)
+                    to_terminal_id = self.get_terminal_id(ferry_request.terminal_to)
+                    
+                    if not from_terminal_id or not to_terminal_id:
+                        logger.error(f"Could not find terminal IDs for {ferry_request.terminal_from} -> {ferry_request.terminal_to}")
+                        logger.info(f"Available terminals: {list(self.terminals_cache.keys())}")
+                        return []
+                    
+                    # Get route ID
+                    route_id = self.get_route_id(from_terminal_id, to_terminal_id)
+                    if not route_id:
+                        logger.error(f"Could not find route for terminals {from_terminal_id} -> {to_terminal_id}")
+                        return []
+                    
+                    logger.info(f"Checking route {route_id}: {ferry_request.terminal_from} ({from_terminal_id}) -> {ferry_request.terminal_to} ({to_terminal_id})")
+                    
+                    # Format date for API (YYYY-MM-DD)
+                    try:
+                        # Handle different date formats
+                        if '/' in ferry_request.sailing_date:
+                            # MM/DD/YYYY format
+                            date_parts = ferry_request.sailing_date.split('/')
+                            api_date = f"{date_parts[2]}-{date_parts[0].zfill(2)}-{date_parts[1].zfill(2)}"
+                        else:
+                            # Assume already in correct format
+                            api_date = ferry_request.sailing_date
+                    except:
+                        logger.error(f"Invalid date format: {ferry_request.sailing_date}")
+                        return []
+                    
+                    # Get schedule for the specific route and date
+                    schedule_url = f"{self.schedule_api}/schedule/{route_id}/{api_date}?apiaccesscode={self.wsdot_api_key}"
+                    
+                    logger.info(f"Requesting: {schedule_url}")
+                    response = self.session.get(schedule_url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        schedule_data = response.json()
+                        available_sailings = self._parse_schedule_data(
+                            schedule_data, 
+                            ferry_request.sailing_time_from,
+                            ferry_request.sailing_time_to,
+                            from_terminal_id,
+                            to_terminal_id,
+                            route_id
+                        )
+                    elif response.status_code == 404:
+                        logger.info(f"No schedule found for route {route_id} on {api_date}")
+                    else:
+                        logger.error(f"WSF API request failed: {response.status_code} - {response.text}")
+                
+                except Exception as e:
+                    logger.error(f"Error checking ferry availability: {e}")
+                
+                return available_sailings
+
+            def _parse_schedule_data(self, schedule_data: dict, time_from: Optional[str], time_to: Optional[str], 
+                                   from_terminal_id: int, to_terminal_id: int, route_id: int) -> List[AvailableSailing]:
+                """Parse WSF schedule data for available sailings"""
+                available_sailings = []
+                
+                try:
+                    # Navigate the WSF API response structure
+                    terminal_combos = schedule_data.get('TerminalCombos', [])
+                    
+                    for combo in terminal_combos:
+                        if (combo.get('DepartingTerminalID') == from_terminal_id and 
+                            combo.get('ArrivingTerminalID') == to_terminal_id):
+                            
+                            times = combo.get('Times', [])
+                            annotations = combo.get('Annotations', [])
+                            
+                            for time_entry in times:
+                                departure_time_raw = time_entry.get('DepartingTime')
+                                arrival_time_raw = time_entry.get('ArrivingTime')
+                                vessel_name = time_entry.get('VesselName', 'Unknown Vessel')
+                                
+                                # Parse departure time
+                                departure_time = self.parse_wsf_time(departure_time_raw)
+                                arrival_time = self.parse_wsf_time(arrival_time_raw)
+                                
+                                if not departure_time:
+                                    continue
+                                
+                                # Check if this sailing is within the requested time range
+                                if not self.is_time_in_range(departure_time, time_from, time_to):
+                                    continue
+                                
+                                # Get annotations for this specific sailing
+                                sailing_annotations = []
+                                annotation_indexes = time_entry.get('AnnotationIndexes', [])
+                                for idx in annotation_indexes:
+                                    if 0 <= idx < len(annotations):
+                                        sailing_annotations.append(annotations[idx])
+                                
+                                # Check if sailing is cancelled or has issues
+                                is_cancelled = any('cancel' in ann.lower() or 'suspend' in ann.lower() 
+                                                 for ann in sailing_annotations)
+                                
+                                # Only include active sailings (not cancelled)
+                                if not is_cancelled:
+                                    sailing = AvailableSailing(
+                                        departure_time=departure_time.strftime('%I:%M %p'),
+                                        arrival_time=arrival_time.strftime('%I:%M %p') if arrival_time else 'Unknown',
+                                        vessel_name=vessel_name,
+                                        route_id=route_id,
+                                        departing_terminal_id=from_terminal_id,
+                                        arriving_terminal_id=to_terminal_id,
+                                        annotations=sailing_annotations,
+                                        is_cancelled=is_cancelled
+                                    )
+                                    available_sailings.append(sailing)
+                                    
+                                    logger.info(f"Found available sailing: {sailing.departure_time} on {vessel_name}")
+                    
+                except Exception as e:
+                    logger.error(f"Error parsing schedule data: {e}")
+                
+                return available_sailings
+
+            def send_discord_notification(self, ferry_request: FerryRequest, available_sailings: List[AvailableSailing]):
+                """Send Discord notification via webhook"""
+                try:
+                    # Create rich embed for Discord
+                    embeds = []
+                    
+                    for sailing in available_sailings[:5]:  # Limit to 5 sailings
+                        embed = {
+                            "title": "🚢 Ferry Availability Found!",
+                            "color": 3447003,  # Blue color
+                            "fields": [
+                                {
+                                    "name": "Route",
+                                    "value": f"{ferry_request.terminal_from} → {ferry_request.terminal_to}",
+                                    "inline": True
+                                },
+                                {
+                                    "name": "Date",
+                                    "value": ferry_request.sailing_date,
+                                    "inline": True
+                                },
+                                {
+                                    "name": "Departure",
+                                    "value": sailing.departure_time,
+                                    "inline": True
+                                },
+                                {
+                                    "name": "Arrival",
+                                    "value": sailing.arrival_time,
+                                    "inline": True
+                                },
+                                {
+                                    "name": "Vessel",
+                                    "value": sailing.vessel_name,
+                                    "inline": True
+                                },
+                                {
+                                    "name": "Route ID",
+                                    "value": str(sailing.route_id),
+                                    "inline": True
+                                }
+                            ],
+                            "footer": {
+                                "text": f"Found at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                            },
+                            "url": "https://secureapps.wsdot.wa.gov/Ferries/Reservations/Vehicle/"
+                        }
+                        
+                        # Add annotations if any
+                        if sailing.annotations:
+                            embed["fields"].append({
+                                "name": "Notes",
+                                "value": " | ".join(sailing.annotations),
+                                "inline": False
+                            })
+                        
+                        embeds.append(embed)
+                    
+                    # Add summary if multiple sailings
+                    if len(available_sailings) > 1:
+                        summary_content = f"🎉 **{len(available_sailings)} ferry sailings available!**\n"
+                        if ferry_request.sailing_time_from or ferry_request.sailing_time_to:
+                            time_range = f" between {ferry_request.sailing_time_from or 'any time'} and {ferry_request.sailing_time_to or 'any time'}"
+                            summary_content += f"Filtered for departures{time_range}"
+                    else:
+                        summary_content = f"🚢 **Ferry availability found!**"
+                    
+                    message = {
+                        "content": summary_content,
+                        "embeds": embeds
+                    }
+                    
+                    response = requests.post(self.discord_webhook_url, json=message, timeout=10)
+                    
+                    if response.status_code == 204:
+                        logger.info("✅ Discord notification sent successfully!")
+                    else:
+                        logger.error(f"❌ Failed to send Discord notification: {response.status_code}")
+                        logger.error(f"Response: {response.text}")
+                
+                except Exception as e:
+                    logger.error(f"❌ Error sending Discord notification: {e}")
+
+            def send_error_notification(self, error_message: str):
+                """Send error notification to Discord"""
+                try:
+                    message = {
+                        "content": f"⚠️ **Ferry Bot Error**\n```{error_message}```\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                    }
+                    requests.post(self.discord_webhook_url, json=message, timeout=10)
+                except Exception as e:
+                    logger.error(f"Failed to send error notification: {e}")
+
+            def run_single_check(self, ferry_requests: List[FerryRequest]):
+                """Run a single check cycle for all ferry requests"""
+                logger.info(f"🚀 Starting ferry check cycle at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                total_found = 0
+                
+                for ferry_request in ferry_requests:
+                    try:
+                        available_sailings = self.check_ferry_availability(ferry_request)
+                        
+                        if available_sailings:
+                            total_found += len(available_sailings)
+                            logger.info(f"🎉 Found {len(available_sailings)} available sailings!")
+                            self.send_discord_notification(ferry_request, available_sailings)
+                        else:
+                            logger.info(f"😞 No availability found for {ferry_request.terminal_from} -> {ferry_request.terminal_to}")
+                        
+                        # Small delay between requests to be respectful
+                        time.sleep(2)
+                    
+                    except Exception as e:
+                        error_msg = f"Error checking {ferry_request.terminal_from} -> {ferry_request.terminal_to}: {e}"
+                        logger.error(error_msg)
+                        self.send_error_notification(error_msg)
+                
+                logger.info(f"✅ Check cycle completed. Found {total_found} total available sailings.")
+
+        def main():
+            """Main function to configure and run the ferry bot"""
+            
+            # Get configuration from environment variables
+            discord_webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
+            wsdot_api_key = os.getenv('WSDOT_API_KEY')
+            ferry_config = os.getenv('FERRY_CONFIG')
+            
+            if not discord_webhook_url:
+                logger.error("DISCORD_WEBHOOK_URL environment variable not set")
+                return
+            
+            if not wsdot_api_key:
+                logger.error("WSDOT_API_KEY environment variable not set")
+                logger.error("Register for free at: https://wsdot.wa.gov/traffic/api/")
+                return
+            
+            if not ferry_config:
+                logger.error("FERRY_CONFIG environment variable not set")
+                return
+            
+            # Parse ferry configuration
+            try:
+                import yaml
+                ferry_requests_data = yaml.safe_load(ferry_config)
+                
+                # Convert to FerryRequest objects
+                ferry_requests = []
+                if isinstance(ferry_requests_data, list):
+                    for req_data in ferry_requests_data:
+                        ferry_requests.append(FerryRequest(**req_data))
+                else:
+                    ferry_requests.append(FerryRequest(**ferry_requests_data))
+                
+            except Exception as e:
+                logger.error(f"Error parsing ferry configuration: {e}")
+                return
+            
+            # Create and run the bot
+            bot = WSFFerryBot(discord_webhook_url, wsdot_api_key)
+            bot.run_single_check(ferry_requests)
+
+        if __name__ == "__main__":
+            main()
+        EOF
+        
+    - name: Run enhanced ferry bot
       env:
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        WSDOT_API_KEY: ${{ secrets.WSDOT_API_KEY }}
         FERRY_CONFIG: ${{ secrets.FERRY_CONFIG }}
       run: |
-        python << 'EOF'
-        import requests
-        import yaml
-        import json
-        import os
-        from datetime import datetime
-        from bs4 import BeautifulSoup
-        import time
-        
-        def load_config():
-            # Load ferry config from environment variable
-            ferry_config_str = os.environ.get('FERRY_CONFIG', '')
-            webhook_url = os.environ.get('DISCORD_WEBHOOK_URL', '')
-            
-            # Parse YAML config
-            ferry_requests = yaml.safe_load(ferry_config_str)
-            
-            return {
-                'requests': ferry_requests if isinstance(ferry_requests, list) else [ferry_requests],
-                'discord': {'webhook': webhook_url}
-            }
-        
-        def check_wsf_availability(terminal_from, terminal_to, sailing_date):
-            """
-            Check WSF availability using their scheduling page
-            This is a simplified version - you may need to adjust based on WSF's actual API
-            """
-            try:
-                # WSF uses different route codes - this is a simplified mapping
-                route_mapping = {
-                    ('Seattle', 'Bainbridge Island'): 'sea-bi',
-                    ('Bainbridge Island', 'Seattle'): 'bi-sea',
-                    ('Edmonds', 'Kingston'): 'edm-king',
-                    ('Kingston', 'Edmonds'): 'king-edm',
-                    ('Anacortes', 'Orcas Island'): 'ana-orc',
-                    ('Orcas Island', 'Anacortes'): 'orc-ana',
-                    # Add more routes as needed
-                }
-                
-                route_key = (terminal_from, terminal_to)
-                if route_key not in route_mapping:
-                    print(f"Route {terminal_from} -> {terminal_to} not supported yet")
-                    return False
-                
-                # Check WSF reservation system
-                # Note: This is a simplified check - WSF's actual system may require more complex handling
-                base_url = "https://www.wsdot.wa.gov/ferries/schedule"
-                
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-                
-                # For now, we'll simulate availability checking
-                # In a real implementation, you'd need to:
-                # 1. Navigate to the WSF reservation page
-                # 2. Fill out the form with your route and date
-                # 3. Parse the results for availability
-                
-                print(f"Checking availability for {terminal_from} -> {terminal_to} on {sailing_date}")
-                
-                # Simulate a random availability check (replace with real logic)
-                import random
-                # Randomly return availability for testing (remove this in production)
-                availability_found = random.choice([True, False, False, False, False])
-                
-                if availability_found:
-                    print(f"🚢 AVAILABILITY FOUND for {terminal_from} -> {terminal_to}")
-                    return True
-                else:
-                    print(f"No availability found for {terminal_from} -> {terminal_to}")
-                    return False
-                    
-            except Exception as e:
-                print(f"Error checking ferry availability: {e}")
-                return False
-        
-        def send_discord_notification(ferry_request, config):
-            webhook_url = config['discord']['webhook']
-            
-            message = {
-                "embeds": [{
-                    "title": "🚢 Ferry Availability Found!",
-                    "color": 3447003,  # Blue color
-                    "fields": [
-                        {
-                            "name": "Route",
-                            "value": f"{ferry_request['terminal_from']} → {ferry_request['terminal_to']}",
-                            "inline": True
-                        },
-                        {
-                            "name": "Date", 
-                            "value": ferry_request['sailing_date'],
-                            "inline": True
-                        },
-                        {
-                            "name": "Time Window",
-                            "value": f"{ferry_request.get('sailing_time_from', 'Any')} - {ferry_request.get('sailing_time_to', 'Any')}",
-                            "inline": True
-                        },
-                        {
-                            "name": "Vehicle",
-                            "value": f"{ferry_request.get('vehicle_size', 'N/A')} ({ferry_request.get('vehicle_height', 'Normal')})",
-                            "inline": True
-                        }
-                    ],
-                    "footer": {
-                        "text": f"Checked at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-                    },
-                    "url": "https://www.wsdot.wa.gov/ferries/schedule"
-                }]
-            }
-            
-            try:
-                response = requests.post(webhook_url, json=message)
-                if response.status_code == 204:
-                    print("✅ Discord notification sent successfully!")
-                else:
-                    print(f"❌ Failed to send Discord notification: {response.status_code}")
-                    print(f"Response: {response.text}")
-            except Exception as e:
-                print(f"❌ Error sending Discord message: {e}")
-        
-        def main():
-            print(f"🚀 Starting WSF Ferry Bot at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-            
-            try:
-                config = load_config()
-                print(f"📝 Loaded config for {len(config['requests'])} ferry requests")
-                
-                for ferry_request in config['requests']:
-                    terminal_from = ferry_request.get('terminal_from', '')
-                    terminal_to = ferry_request.get('terminal_to', '')
-                    sailing_date = ferry_request.get('sailing_date', '')
-                    
-                    print(f"\n🔍 Checking: {terminal_from} → {terminal_to} on {sailing_date}")
-                    
-                    availability = check_wsf_availability(terminal_from, terminal_to, sailing_date)
-                    
-                    if availability:
-                        print("🎉 Availability found! Sending notification...")
-                        send_discord_notification(ferry_request, config)
-                    else:
-                        print("😞 No availability found")
-                    
-                    # Small delay between requests to be respectful
-                    time.sleep(2)
-                
-                print(f"\n✅ Ferry bot completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                
-            except Exception as e:
-                print(f"❌ Error in main: {e}")
-                # Send error notification to Discord
-                try:
-                    config = load_config()
-                    error_message = {
-                        "content": f"⚠️ **Ferry Bot Error**\n```{str(e)}```\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-                    }
-                    requests.post(config['discord']['webhook'], json=error_message)
-                except:
-                    pass
-        
-        # Run the bot
-        main()
-        EOF
+        python enhanced_ferry_bot.py
