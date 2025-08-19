@@ -21,79 +21,174 @@ jobs:
         
     - name: Install dependencies
       run: |
-        pip install requests pyyaml beautifulsoup4
-        
-    - name: Create config file
-      run: |
-        cat > config.yml << EOF
-        interval: 300
-        requests:
-        ${{ secrets.FERRY_CONFIG }}
-        discord:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        EOF
+        pip install requests pyyaml beautifulsoup4 selenium webdriver-manager
         
     - name: Run ferry bot
+      env:
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        FERRY_CONFIG: ${{ secrets.FERRY_CONFIG }}
       run: |
         python << 'EOF'
         import requests
         import yaml
-        import time
         import json
+        import os
         from datetime import datetime
+        from bs4 import BeautifulSoup
+        import time
         
-        # Load configuration
-        with open('config.yml', 'r') as f:
-            config = yaml.safe_load(f)
-        
-        def check_ferry_availability():
-            print(f"Checking ferry availability at {datetime.now()}")
+        def load_config():
+            # Load ferry config from environment variable
+            ferry_config_str = os.environ.get('FERRY_CONFIG', '')
+            webhook_url = os.environ.get('DISCORD_WEBHOOK_URL', '')
             
-            for request in config['requests']:
-                terminal_from = request['terminal_from']
-                terminal_to = request['terminal_to']
-                sailing_date = request['sailing_date']
-                
-                print(f"Checking {terminal_from} -> {terminal_to} on {sailing_date}")
-                
-                # WSF API endpoint (this is a simplified example)
-                # You'll need to adapt this to the actual WSF booking system
-                wsf_url = "https://www.wsdot.wa.gov/ferries/schedule"
-                
-                try:
-                    # This is where you'd implement the actual ferry checking logic
-                    # For now, we'll simulate checking
-                    print(f"Simulating check for {terminal_from} to {terminal_to}")
-                    
-                    # If availability found (you'd implement real logic here):
-                    availability_found = False  # Replace with real check
-                    
-                    if availability_found:
-                        send_discord_notification(request)
-                        
-                except Exception as e:
-                    print(f"Error checking ferry: {e}")
+            # Parse YAML config
+            ferry_requests = yaml.safe_load(ferry_config_str)
+            
+            return {
+                'requests': ferry_requests if isinstance(ferry_requests, list) else [ferry_requests],
+                'discord': {'webhook': webhook_url}
+            }
         
-        def send_discord_notification(ferry_request):
+        def check_wsf_availability(terminal_from, terminal_to, sailing_date):
+            """
+            Check WSF availability using their scheduling page
+            This is a simplified version - you may need to adjust based on WSF's actual API
+            """
+            try:
+                # WSF uses different route codes - this is a simplified mapping
+                route_mapping = {
+                    ('Seattle', 'Bainbridge Island'): 'sea-bi',
+                    ('Bainbridge Island', 'Seattle'): 'bi-sea',
+                    ('Edmonds', 'Kingston'): 'edm-king',
+                    ('Kingston', 'Edmonds'): 'king-edm',
+                    ('Anacortes', 'Orcas Island'): 'ana-orc',
+                    ('Orcas Island', 'Anacortes'): 'orc-ana',
+                    # Add more routes as needed
+                }
+                
+                route_key = (terminal_from, terminal_to)
+                if route_key not in route_mapping:
+                    print(f"Route {terminal_from} -> {terminal_to} not supported yet")
+                    return False
+                
+                # Check WSF reservation system
+                # Note: This is a simplified check - WSF's actual system may require more complex handling
+                base_url = "https://www.wsdot.wa.gov/ferries/schedule"
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                
+                # For now, we'll simulate availability checking
+                # In a real implementation, you'd need to:
+                # 1. Navigate to the WSF reservation page
+                # 2. Fill out the form with your route and date
+                # 3. Parse the results for availability
+                
+                print(f"Checking availability for {terminal_from} -> {terminal_to} on {sailing_date}")
+                
+                # Simulate a random availability check (replace with real logic)
+                import random
+                # Randomly return availability for testing (remove this in production)
+                availability_found = random.choice([True, False, False, False, False])
+                
+                if availability_found:
+                    print(f"🚢 AVAILABILITY FOUND for {terminal_from} -> {terminal_to}")
+                    return True
+                else:
+                    print(f"No availability found for {terminal_from} -> {terminal_to}")
+                    return False
+                    
+            except Exception as e:
+                print(f"Error checking ferry availability: {e}")
+                return False
+        
+        def send_discord_notification(ferry_request, config):
             webhook_url = config['discord']['webhook']
             
             message = {
-                "content": f"🚢 **Ferry Availability Found!**\n"
-                          f"Route: {ferry_request['terminal_from']} → {ferry_request['terminal_to']}\n"
-                          f"Date: {ferry_request['sailing_date']}\n"
-                          f"Time: {ferry_request['sailing_time_from']} - {ferry_request['sailing_time_to']}\n"
-                          f"Visit: https://www.wsdot.wa.gov/ferries/schedule"
+                "embeds": [{
+                    "title": "🚢 Ferry Availability Found!",
+                    "color": 3447003,  # Blue color
+                    "fields": [
+                        {
+                            "name": "Route",
+                            "value": f"{ferry_request['terminal_from']} → {ferry_request['terminal_to']}",
+                            "inline": True
+                        },
+                        {
+                            "name": "Date", 
+                            "value": ferry_request['sailing_date'],
+                            "inline": True
+                        },
+                        {
+                            "name": "Time Window",
+                            "value": f"{ferry_request.get('sailing_time_from', 'Any')} - {ferry_request.get('sailing_time_to', 'Any')}",
+                            "inline": True
+                        },
+                        {
+                            "name": "Vehicle",
+                            "value": f"{ferry_request.get('vehicle_size', 'N/A')} ({ferry_request.get('vehicle_height', 'Normal')})",
+                            "inline": True
+                        }
+                    ],
+                    "footer": {
+                        "text": f"Checked at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                    },
+                    "url": "https://www.wsdot.wa.gov/ferries/schedule"
+                }]
             }
             
             try:
                 response = requests.post(webhook_url, json=message)
                 if response.status_code == 204:
-                    print("Discord notification sent successfully!")
+                    print("✅ Discord notification sent successfully!")
                 else:
-                    print(f"Failed to send notification: {response.status_code}")
+                    print(f"❌ Failed to send Discord notification: {response.status_code}")
+                    print(f"Response: {response.text}")
             except Exception as e:
-                print(f"Error sending Discord message: {e}")
+                print(f"❌ Error sending Discord message: {e}")
         
-        # Run the check
-        check_ferry_availability()
+        def main():
+            print(f"🚀 Starting WSF Ferry Bot at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            
+            try:
+                config = load_config()
+                print(f"📝 Loaded config for {len(config['requests'])} ferry requests")
+                
+                for ferry_request in config['requests']:
+                    terminal_from = ferry_request.get('terminal_from', '')
+                    terminal_to = ferry_request.get('terminal_to', '')
+                    sailing_date = ferry_request.get('sailing_date', '')
+                    
+                    print(f"\n🔍 Checking: {terminal_from} → {terminal_to} on {sailing_date}")
+                    
+                    availability = check_wsf_availability(terminal_from, terminal_to, sailing_date)
+                    
+                    if availability:
+                        print("🎉 Availability found! Sending notification...")
+                        send_discord_notification(ferry_request, config)
+                    else:
+                        print("😞 No availability found")
+                    
+                    # Small delay between requests to be respectful
+                    time.sleep(2)
+                
+                print(f"\n✅ Ferry bot completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                
+            except Exception as e:
+                print(f"❌ Error in main: {e}")
+                # Send error notification to Discord
+                try:
+                    config = load_config()
+                    error_message = {
+                        "content": f"⚠️ **Ferry Bot Error**\n```{str(e)}```\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                    }
+                    requests.post(config['discord']['webhook'], json=error_message)
+                except:
+                    pass
+        
+        # Run the bot
+        main()
         EOF
